@@ -1,0 +1,2 @@
+# Kakaotalk-Dimmer
+Kakaotalk dimmer
