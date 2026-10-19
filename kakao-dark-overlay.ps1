@@ -168,6 +168,8 @@ public class Win32Extra {
     [DllImport("user32.dll")]
     public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
     [DllImport("user32.dll")]
+    public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);
+    [DllImport("user32.dll")]
     public static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
     [DllImport("user32.dll")]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
@@ -187,11 +189,21 @@ $RGN_DIFF       = 4
 $HWND_TOPMOST   = [IntPtr]::new(-1)
 $SWP_NOACTIVATE = 0x0010
 
+# Windows 10 2004(빌드 19041)부터 지원. 오버레이 창 자체를 화면 캡처에서 제외시켜서
+# 내 화면에는 평소처럼 어둡게 보이되, 녹화/화면공유 쪽에는 전혀 찍히지 않게 한다.
+$WDA_EXCLUDEFROMCAPTURE = 0x00000011
+$script:supportsExcludeFromCapture = [Environment]::OSVersion.Version.Build -ge 19041
+
 $script:overlays = @{}   # hwnd(문자열) -> [PSCustomObject]@{ Form }
 
 function New-OverlayEntry {
     $form = New-Object OverlayForm
     $null = $form.Handle
+    if ($script:supportsExcludeFromCapture) {
+        if (-not [Win32Extra]::SetWindowDisplayAffinity($form.Handle, $WDA_EXCLUDEFROMCAPTURE)) {
+            Write-DebugLog "SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) 실패"
+        }
+    }
     return [PSCustomObject]@{ Form = $form }
 }
 
