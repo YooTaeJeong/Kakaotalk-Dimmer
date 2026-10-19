@@ -215,56 +215,13 @@ $null = $script:pumpForm.Handle
 
 # ---- 트레이 아이콘 & 메뉴 ----
 $trayIcon = New-Object System.Windows.Forms.NotifyIcon
+$iconPath = Join-Path $PSScriptRoot "icon.ico"
+if (Test-Path $iconPath) {
+    $trayIcon.Icon = New-Object System.Drawing.Icon($iconPath)
+} else {
+    $trayIcon.Icon = [System.Drawing.SystemIcons]::Application
+}
 $trayIcon.Visible = $true
-
-# 밝기(%)에 따라 색이 변하는 달 모양 아이콘 생성.
-# 낮은 밝기 -> 따뜻한 호박색. 높은 밝기 -> 짙은 남색. 꺼짐 -> 옅은 회색.
-function Get-MoonColorForPercent([int]$percent) {
-    if ($percent -le 0) {
-        return [System.Drawing.Color]::FromArgb(255, 205, 205, 210)
-    }
-    $lowColor  = @(250, 210, 120)   # 밝은 호박색 (약한 어둡기)
-    $highColor = @(60, 70, 100)     # 짙은 남색 (강한 어둡기)
-    $t = [Math]::Max(0.0, [Math]::Min(1.0, ($percent - 10) / 80.0))
-    $r = [int]($lowColor[0] + ($t * ($highColor[0] - $lowColor[0])))
-    $g = [int]($lowColor[1] + ($t * ($highColor[1] - $lowColor[1])))
-    $b = [int]($lowColor[2] + ($t * ($highColor[2] - $lowColor[2])))
-    return [System.Drawing.Color]::FromArgb(255, $r, $g, $b)
-}
-
-function New-MoonIcon([int]$percent) {
-    $size = 32
-    $bmp = New-Object System.Drawing.Bitmap $size, $size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $g.Clear([System.Drawing.Color]::Transparent)
-
-    $moonColor = Get-MoonColorForPercent $percent
-    $brush = New-Object System.Drawing.SolidBrush $moonColor
-    $inset = 4
-    $d = $size - ($inset * 2)
-    $g.FillEllipse($brush, $inset, $inset, $d, $d)
-
-    # 초승달 모양으로 깎아내기
-    $g.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
-    $cutBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(0,0,0,0))
-    $g.FillEllipse($cutBrush, $inset + 20, $inset - 10, $d, $d)
-
-    $brush.Dispose(); $cutBrush.Dispose(); $g.Dispose()
-    $hIcon = $bmp.GetHicon()
-    $bmp.Dispose()
-    return $hIcon
-}
-
-$script:trayIconHandle = [IntPtr]::Zero
-function Set-TrayIconForPercent([int]$percent) {
-    $newHandle = New-MoonIcon $percent
-    $trayIcon.Icon = [System.Drawing.Icon]::FromHandle($newHandle)
-    if ($script:trayIconHandle -ne [IntPtr]::Zero) {
-        [Win32Extra]::DestroyIcon($script:trayIconHandle) | Out-Null
-    }
-    $script:trayIconHandle = $newHandle
-}
 
 $trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
 
@@ -342,7 +299,6 @@ function Update-TrayChecksAndText {
     foreach ($kv in $script:speedItems.GetEnumerator()) { $kv.Value.Checked = ($kv.Key -eq $script:currentPollMs) }
     $label = if ($script:currentPercent -eq 0) { "끔" } else { "$($script:currentPercent)%" }
     $trayIcon.Text = "카카오톡 다크모드 ($label / $($script:currentPollMs)ms)"
-    Set-TrayIconForPercent $script:currentPercent
 }
 Update-TrayChecksAndText
 
@@ -475,9 +431,6 @@ function Stop-Overlay {
     $timer.Stop()
     $trayIcon.Visible = $false
     $trayIcon.Dispose()
-    if ($script:trayIconHandle -ne [IntPtr]::Zero) {
-        [Win32Extra]::DestroyIcon($script:trayIconHandle) | Out-Null
-    }
     foreach ($entry in $script:overlays.Values) {
         if (-not $entry.Form.IsDisposed) { $entry.Form.Close() }
     }
