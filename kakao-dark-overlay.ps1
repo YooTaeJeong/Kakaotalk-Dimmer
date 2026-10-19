@@ -267,9 +267,18 @@ function Set-TrayIconForPercent([int]$percent) {
 }
 
 $trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
-$headerItem = New-Object System.Windows.Forms.ToolStripMenuItem("카카오톡 다크모드")
-$headerItem.Enabled = $false
-$trayMenu.Items.Add($headerItem) | Out-Null
+
+# --- 정보 ---
+$infoItem = New-Object System.Windows.Forms.ToolStripMenuItem("정보")
+$infoItem.Add_Click({
+    [System.Windows.Forms.MessageBox]::Show(
+        "Made by 이현섭, 유태정 (Eddie Yoo)`nVersion: Version 2.0.0",
+        "정보",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    ) | Out-Null
+})
+$trayMenu.Items.Add($infoItem) | Out-Null
 $trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 
 # --- 밝기 서브메뉴 ---
@@ -320,8 +329,12 @@ foreach ($label in $speedOptions.Keys) {
 }
 
 $trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
+
+# 앞으로 메뉴 항목을 추가할 때는 반드시 이 지점(종료 추가) 이전에 넣을 것 -
+# 종료는 항상 메뉴 맨 아래에 고정되어야 한다.
 $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem("종료")
 $trayMenu.Items.Add($exitItem) | Out-Null
+
 $trayIcon.ContextMenuStrip = $trayMenu
 
 function Update-TrayChecksAndText {
