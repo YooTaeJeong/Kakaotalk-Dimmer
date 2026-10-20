@@ -1,6 +1,6 @@
 # Kakaotalk Dimmer
 
-Made by Hyeonseop Lee, Taejeong Yoo (Eddie Yoo)
+Made by [Hyeonseop Lee](https://github.com/L1FEGUARD), [Taejeong Yoo](https://github.com/YooTaeJeong) (Eddie Yoo)
 
 카카오톡(PC) 창이 너무 밝아서 눈이 피로할 때, 화면 위에 반투명한 검은 오버레이를 씌워 밝기를 낮춰주는 Windows용 트레이 유틸리티입니다.
 
