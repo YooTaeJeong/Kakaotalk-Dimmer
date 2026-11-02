@@ -1,5 +1,5 @@
 ﻿param(
-    [int]$MinWindowSize = 300,
+    [int]$MinWindowSize = 120,
     [switch]$DisableClipping,
     [switch]$DebugClipping
 )
@@ -131,6 +131,12 @@ public class Win32 {
         "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"
     };
 
+    // 툴팁/메뉴/드롭다운처럼 "진짜 보이는 창"이 아니라 OS가 잠깐 띄우는 보조용 창들.
+    // 이런 것까지 오버레이 대상에 넣으면 화면 아무 데나 까만 사각형이 깜빡이는 부작용이 생긴다.
+    private static readonly HashSet<string> HelperClassNames = new HashSet<string> {
+        "tooltips_class32", "#32768", "ComboLBox", "DropDown"
+    };
+
     public static string GetClassNameOf(IntPtr hWnd) {
         var sb = new StringBuilder(256);
         GetClassName(hWnd, sb, 256);
@@ -145,13 +151,18 @@ public class Win32 {
         return false;
     }
 
+    public static bool IsHelperWindow(IntPtr hWnd) {
+        return HelperClassNames.Contains(GetClassNameOf(hWnd));
+    }
+
     public static List<IntPtr> GetAllVisibleWindowsZOrder() {
         var result = new List<IntPtr>();
         EnumWindows((hWnd, lParam) => {
-            if (IsWindowVisible(hWnd) && !IsIconic(hWnd) && !IsShellWindow(hWnd)) {
-                var sb = new StringBuilder(256);
-                GetWindowText(hWnd, sb, 256);
-                if (sb.Length > 0) result.Add(hWnd);
+            // 제목(title)이 비어있어도 대상에 포함시킨다 - 카카오톡 내장 이미지/파일 뷰어처럼
+            // 제목 없는 팝업도 어둡게 하려면 필요하다. 대신 진짜 보조용 창(툴팁/메뉴 등)은
+            // IsHelperWindow로 따로 걸러낸다.
+            if (IsWindowVisible(hWnd) && !IsIconic(hWnd) && !IsShellWindow(hWnd) && !IsHelperWindow(hWnd)) {
+                result.Add(hWnd);
             }
             return true;
         }, IntPtr.Zero);

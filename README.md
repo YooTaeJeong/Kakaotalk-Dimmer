@@ -32,8 +32,9 @@ Made by [Hyeonseop Lee](https://github.com/L1FEGUARD), [Taejeong Yoo](https://gi
 
 ## 동작 방식 (간단히)
 
-- Win32 API(`EnumWindows`, `GetWindowRect` 등)로 화면에 보이는 모든 창을 z-order(쌓임 순서) 순으로 확인합니다.
-- 그중 카카오톡(`KakaoTalk.exe`) 프로세스 소유의, 일정 크기(`-MinWindowSize`, 기본 300px) 이상인 창을 찾아 그 위치/크기에 맞춰 반투명 검은 오버레이(Layered Window)를 씌웁니다.
+- Win32 API(`EnumWindows`, `GetWindowRect` 등)로 화면에 보이는 모든 창을 z-order(쌓임 순서) 순으로 확인합니다. 제목(title)이 없는 창(예: 카카오톡 내장 이미지/파일 뷰어)도 대상에 포함됩니다.
+- 툴팁(`tooltips_class32`), 메뉴(`#32768`), 드롭다운 같은 OS 보조용 창은 클래스 이름으로 걸러내어 애초에 후보에서 제외합니다.
+- 그중 카카오톡(`KakaoTalk.exe`) 프로세스 소유의, 일정 크기(`-MinWindowSize`, 기본 120px) 이상인 창을 찾아 그 위치/크기에 맞춰 반투명 검은 오버레이(Layered Window)를 씌웁니다. 이모티콘 선택창이나 사진/파일 뷰어처럼 메인 채팅창보다 작은 팝업도 대부분 이 기준을 넘어 오버레이 대상이 됩니다.
 - 오버레이보다 z-order상 위에 있는(=더 앞에 떠 있는) 다른 창과 겹치는 영역은 `SetWindowRgn`으로 잘라내어, 카카오톡 창이 다른 창에 가려진 부분까지 어둡게 칠하지 않도록 합니다.
 - 오버레이 창은 `WS_EX_TRANSPARENT | WS_EX_NOACTIVATE`로 생성되어 클릭/포커스를 가로채지 않습니다.
 
@@ -43,7 +44,7 @@ Made by [Hyeonseop Lee](https://github.com/L1FEGUARD), [Taejeong Yoo](https://gi
 
 | 파라미터 | 기본값 | 설명 |
 | --- | --- | --- |
-| `-MinWindowSize` | `300` | 이 크기(px)보다 작은 창은 무시합니다 (숨김 헬퍼 창 제외용) |
+| `-MinWindowSize` | `120` | 이 크기(px)보다 작은 창은 무시합니다 (숨김 헬퍼 창 제외용) |
 | `-DisableClipping` | off | 다른 창과 겹치는 부분을 잘라내는 기능을 끕니다 |
 | `-DebugClipping` | off | 어떤 창과 겹쳐서 잘렸는지 콘솔에 출력합니다 (디버그용) |
 
@@ -54,7 +55,7 @@ powershell -NoProfile -File .\kakao-dark-overlay.ps1 -MinWindowSize 200 -DebugCl
 ## 알려진 제한 사항
 
 - 카카오톡 창을 매우 빠르게 움직이거나 리사이즈하면, 반응속도 설정 간격만큼 아주 짧게 오버레이가 늦게 따라올 수 있습니다.
-- `-MinWindowSize`보다 작은 팝업(이모티콘 선택창 등)은 오버레이 대상에서 제외됩니다.
+- `-MinWindowSize`(기본 120px)보다 작은 아주 작은 팝업은 여전히 오버레이 대상에서 제외됩니다. 필요하면 실행 시 `-MinWindowSize` 값을 더 낮춰서 조정할 수 있습니다.
 
 ## 라이선스
 
