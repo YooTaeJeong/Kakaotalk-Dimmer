@@ -37,7 +37,7 @@ function Write-DebugLog($text) {
     try {
         # 창을 드래그하는 동안 클리핑 로그가 많이 쌓이므로 1MB를 넘으면 비운다.
         if ((Test-Path $debugLog) -and (Get-Item $debugLog).Length -gt 1MB) { Clear-Content $debugLog }
-        Add-Content -Path $debugLog -Value ("[{0}] {1}" -f (Get-Date -Format "u"), $text)
+        Add-Content -Path $debugLog -Encoding UTF8 -Value ("[{0}] {1}" -f (Get-Date -Format "u"), $text)
     } catch { }
 }
 
@@ -132,8 +132,27 @@ public class Win32 {
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
     [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
     [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hWnd, int dwAttribute, out int pvAttribute, int cbAttribute);
+    [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc enumProc, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr hWnd);
 
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    // 카톡 창 안의 자식 창(목록, 광고 배너 등) 구조를 한 줄씩 문자열로 만든다.
+    // 좌표는 부모 창 기준 상대값이라 창을 드래그해도 결과가 바뀌지 않는다 (로그 중복 방지).
+    public static string DumpChildren(IntPtr parent) {
+        RECT pr;
+        GetWindowRect(parent, out pr);
+        var sb = new StringBuilder();
+        EnumChildWindows(parent, (h, l) => {
+            RECT r;
+            GetWindowRect(h, out r);
+            sb.AppendFormat("    hwnd={0} parent={1} class={2} title='{3}' visible={4} rel=L{5},T{6},W{7},H{8}\r\n",
+                h, GetParent(h), GetClassNameOf(h), GetTitleOf(h), IsWindowVisible(h),
+                r.Left - pr.Left, r.Top - pr.Top, r.Right - r.Left, r.Bottom - r.Top);
+            return true;
+        }, IntPtr.Zero);
+        return sb.ToString();
+    }
 
     // 백그라운드로 내려간 UWP 앱(설정, 계산기, 스토어 등)은 IsWindowVisible=true지만 실제로는
     // DWM이 숨겨둔(cloaked) 창이다. 이런 창이 특정 모니터에 걸쳐 있으면 카톡을 가린 것으로
@@ -225,6 +244,97 @@ public class Win32Extra {
 }
 "@
 
+# ---- 카톡 메인 창 하단 광고 숨기기 ----
+# 메인 창(제목 '카카오톡') 구조:
+#   - OnlineMainView_...      : 친구/채팅 목록 영역 (광고 칸 바로 위에서 끝남)
+#   - 제목 없는 EVA_ChildWindow : 맨 아래 100px 광고 자리
+#   - 광고 내용은 광고 자리와 똑같은 위치에 겹쳐 뜨는 별도 최상위 창(제목 없는 EVA_Window_Dblclk)이 그린다
+# 광고 자리와 광고 창을 숨기고, 목록 영역을 광고 자리 끝까지 늘려서 빈칸이 안 남게 한다.
+# 카톡이 광고를 다시 띄우거나 레이아웃을 되돌려도 매 틱마다 다시 맞춘다.
+Add-Type @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class KakaoAd {
+    public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+    public struct RECT { public int Left, Top, Right, Bottom; }
+
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc proc, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Auto)] static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int X, int Y, int cx, int cy, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Auto)] static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int n);
+    [DllImport("user32.dll", CharSet = CharSet.Auto)] static extern int GetClassName(IntPtr hWnd, StringBuilder sb, int n);
+
+    const int SW_HIDE = 0;
+    const uint SWP_NOMOVE = 0x0002, SWP_NOZORDER = 0x0004, SWP_NOACTIVATE = 0x0010;
+
+    static string TextOf(IntPtr h) { var sb = new StringBuilder(256); GetWindowText(h, sb, 256); return sb.ToString(); }
+    static string ClassOf(IntPtr h) { var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString(); }
+
+    // 실제로 뭔가 바꿨으면 그 내용을(로그용), 아니면 빈 문자열을 돌려준다.
+    public static string HideAds(int[] pids) {
+        var pidSet = new HashSet<int>(pids);
+        var tops = new List<IntPtr>();
+        EnumWindows((h, l) => {
+            uint pid;
+            GetWindowThreadProcessId(h, out pid);
+            if (pidSet.Contains((int)pid)) tops.Add(h);
+            return true;
+        }, IntPtr.Zero);
+
+        var log = new StringBuilder();
+        var adRects = new List<RECT>();
+
+        foreach (var main in tops) {
+            IntPtr view = IntPtr.Zero, adSlot = IntPtr.Zero;
+            for (IntPtr c = FindWindowEx(main, IntPtr.Zero, null, null); c != IntPtr.Zero; c = FindWindowEx(main, c, null, null)) {
+                string t = TextOf(c);
+                if (t.StartsWith("OnlineMainView")) view = c;
+                else if (t.Length == 0 && ClassOf(c) == "EVA_ChildWindow") adSlot = c;
+            }
+            if (view == IntPtr.Zero || adSlot == IntPtr.Zero) continue;   // 메인 창이 아님
+
+            RECT ad;
+            GetWindowRect(adSlot, out ad);   // 숨긴 뒤에도 위치는 그대로 남아 있다
+            adRects.Add(ad);
+            if (IsWindowVisible(adSlot)) {
+                ShowWindow(adSlot, SW_HIDE);
+                log.Append("hid ad slot; ");
+            }
+
+            RECT vr;
+            GetWindowRect(view, out vr);
+            int wantH = ad.Bottom - vr.Top;
+            if (wantH > 0 && vr.Bottom - vr.Top != wantH) {
+                SetWindowPos(view, IntPtr.Zero, 0, 0, vr.Right - vr.Left, wantH, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                log.Append("stretched list " + (vr.Bottom - vr.Top) + "->" + wantH + "; ");
+            }
+        }
+
+        // 광고 자리와 위치가 정확히 같은 제목 없는 카톡 창만 숨긴다 (이모티콘 창 등 다른 팝업은 건드리지 않음)
+        foreach (var h in tops) {
+            if (!IsWindowVisible(h) || TextOf(h).Length != 0 || ClassOf(h) != "EVA_Window_Dblclk") continue;
+            RECT r;
+            GetWindowRect(h, out r);
+            foreach (var a in adRects) {
+                if (r.Left == a.Left && r.Top == a.Top && r.Right == a.Right && r.Bottom == a.Bottom) {
+                    ShowWindow(h, SW_HIDE);
+                    log.Append("hid ad popup; ");
+                    break;
+                }
+            }
+        }
+        return log.ToString();
+    }
+}
+"@
+
 $LWA_ALPHA      = 0x2
 $RGN_DIFF       = 4
 $HWND_TOPMOST   = [IntPtr]::new(-1)
@@ -237,6 +347,8 @@ $script:supportsExcludeFromCapture = [Environment]::OSVersion.Version.Build -ge 
 
 $script:overlays = @{}   # hwnd(문자열) -> [PSCustomObject]@{ Form }
 $script:lastClipSig = @{}   # hwnd(문자열) -> 마지막으로 기록한 클리핑 상태 (debug.log 중복 방지)
+$script:lastChildDump = @{}     # hwnd(문자열) -> 마지막으로 기록한 자식 창 구조
+$script:lastChildDumpAt = @{}   # hwnd(문자열) -> 마지막으로 자식 창 구조를 확인한 시각
 
 Write-DebugLog "START"
 foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
@@ -367,6 +479,13 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $script:currentPollMs
 $timer.Add_Tick({
   try {
+    # 광고 숨기기는 밝기를 '끄기'로 해도 계속 동작하도록 밝기 처리보다 먼저 한다.
+    Refresh-KakaoPidsIfNeeded
+    if ($script:kakaoPidSet.Count -gt 0) {
+        $adLog = [KakaoAd]::HideAds([int[]]@($script:kakaoPidSet.Keys))
+        if ($adLog) { Write-DebugLog ("ad: " + $adLog) }
+    }
+
     if ($script:currentPercent -le 0) {
         # 꺼짐 상태: 남아있는 오버레이가 있으면 다 숨기고 리턴
         foreach ($entry in $script:overlays.Values) {
@@ -375,7 +494,6 @@ $timer.Add_Tick({
         return
     }
 
-    Refresh-KakaoPidsIfNeeded
     $alphaByte = [byte]([Math]::Round($script:currentPercent * 255.0 / 100.0))
 
     $allHwnds = [Win32]::GetAllVisibleWindowsZOrder()
@@ -405,6 +523,18 @@ $timer.Add_Tick({
         if ($isKakao -and $w -gt $MinWindowSize -and $ht -gt $MinWindowSize) {
             $key = $h.ToString()
             $validKeys[$key] = $true
+
+            # 광고 배너 위치를 찾기 위한 진단: 카톡 창 안의 자식 창 구조를 2초마다 확인해서
+            # 바뀌었을 때만 debug.log에 남긴다 (광고는 창이 뜬 뒤 늦게 로드되기도 함).
+            $now = Get-Date
+            if (-not $script:lastChildDumpAt.ContainsKey($key) -or ($now - $script:lastChildDumpAt[$key]).TotalSeconds -ge 2) {
+                $script:lastChildDumpAt[$key] = $now
+                $dump = [Win32]::DumpChildren($h)
+                if ($script:lastChildDump[$key] -ne $dump) {
+                    $script:lastChildDump[$key] = $dump
+                    Write-DebugLog ("children of kakao hwnd={0} class={1} title='{2}' size={3}x{4}:`r`n{5}" -f $h, [Win32]::GetClassNameOf($h), [Win32]::GetTitleOf($h), $w, $ht, $dump)
+                }
+            }
 
             if (-not $script:overlays.ContainsKey($key)) {
                 $script:overlays[$key] = New-OverlayEntry
@@ -475,6 +605,8 @@ $timer.Add_Tick({
         if (-not $entry.Form.IsDisposed) { $entry.Form.Close() }
         $script:overlays.Remove($key)
         $script:lastClipSig.Remove($key)
+        $script:lastChildDump.Remove($key)
+        $script:lastChildDumpAt.Remove($key)
     }
   } catch {
     Write-DebugLog ("TICK ERROR: " + $_.Exception.ToString())
