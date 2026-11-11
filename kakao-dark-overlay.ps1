@@ -34,7 +34,11 @@ $debugLog   = Join-Path $configDir "debug.log"
 if (-not (Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir | Out-Null }
 
 function Write-DebugLog($text) {
-    try { Add-Content -Path $debugLog -Value ("[{0}] {1}" -f (Get-Date -Format "u"), $text) } catch { }
+    try {
+        # 창을 드래그하는 동안 클리핑 로그가 많이 쌓이므로 1MB를 넘으면 비운다.
+        if ((Test-Path $debugLog) -and (Get-Item $debugLog).Length -gt 1MB) { Clear-Content $debugLog }
+        Add-Content -Path $debugLog -Value ("[{0}] {1}" -f (Get-Date -Format "u"), $text)
+    } catch { }
 }
 
 [System.Windows.Forms.Application]::add_ThreadException({
@@ -103,6 +107,9 @@ public class OverlayForm : Form {
 
     protected override void WndProc(ref Message m) {
         if (m.Msg == WM_NCHITTEST) { m.Result = (IntPtr)HTTRANSPARENT; return; }
+        // 배율(DPI)이 다른 모니터로 넘어갈 때 WinForms가 창 크기/위치를 멋대로 바꾸지 않게 무시.
+        // 위치는 타이머에서 SetWindowPos로 물리 픽셀 기준으로 직접 맞춘다.
+        if (m.Msg == 0x02E0 /* WM_DPICHANGED */) { m.Result = IntPtr.Zero; return; }
         base.WndProc(ref m);
     }
 }
@@ -123,8 +130,27 @@ public class Win32 {
     [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
     [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hWnd, int dwAttribute, out int pvAttribute, int cbAttribute);
 
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    // 백그라운드로 내려간 UWP 앱(설정, 계산기, 스토어 등)은 IsWindowVisible=true지만 실제로는
+    // DWM이 숨겨둔(cloaked) 창이다. 이런 창이 특정 모니터에 걸쳐 있으면 카톡을 가린 것으로
+    // 오인해서 그 모니터의 오버레이가 통째로 잘려나갔다.
+    public static bool IsCloaked(IntPtr hWnd) {
+        int cloaked = 0;
+        try {
+            if (DwmGetWindowAttribute(hWnd, 14 /* DWMWA_CLOAKED */, out cloaked, sizeof(int)) != 0) return false;
+        } catch { return false; }
+        return cloaked != 0;
+    }
+
+    public static string GetTitleOf(IntPtr hWnd) {
+        var sb = new StringBuilder(256);
+        GetWindowText(hWnd, sb, 256);
+        return sb.ToString();
+    }
     public struct RECT { public int Left, Top, Right, Bottom; }
 
     private static readonly HashSet<string> ShellClassNames = new HashSet<string> {
@@ -148,6 +174,10 @@ public class Win32 {
         if (ShellClassNames.Contains(cls)) return true;
         // HwndWrapper[...]: WPF 기반 백그라운드 유틸리티들이 자신도 모르게 끼어드는 경우가 있어 제외
         if (cls.StartsWith("HwndWrapper[")) return true;
+        // 펜/필기 입력용 투명 창. 주 모니터 전체를 덮고 있어서 그 모니터의 오버레이가 통째로 잘렸다.
+        if (cls.StartsWith("ShellHandwritingCanvas")) return true;
+        // 클릭이 통과하는(WS_EX_TRANSPARENT) 창은 화면을 실제로 가리지 않는 오버레이류이므로 제외
+        if ((GetWindowLong(hWnd, -20 /* GWL_EXSTYLE */) & 0x20 /* WS_EX_TRANSPARENT */) != 0) return true;
         return false;
     }
 
@@ -161,7 +191,7 @@ public class Win32 {
             // 제목(title)이 비어있어도 대상에 포함시킨다 - 카카오톡 내장 이미지/파일 뷰어처럼
             // 제목 없는 팝업도 어둡게 하려면 필요하다. 대신 진짜 보조용 창(툴팁/메뉴 등)은
             // IsHelperWindow로 따로 걸러낸다.
-            if (IsWindowVisible(hWnd) && !IsIconic(hWnd) && !IsShellWindow(hWnd) && !IsHelperWindow(hWnd)) {
+            if (IsWindowVisible(hWnd) && !IsIconic(hWnd) && !IsShellWindow(hWnd) && !IsHelperWindow(hWnd) && !IsCloaked(hWnd)) {
                 result.Add(hWnd);
             }
             return true;
@@ -206,6 +236,12 @@ $WDA_EXCLUDEFROMCAPTURE = 0x00000011
 $script:supportsExcludeFromCapture = [Environment]::OSVersion.Version.Build -ge 19041
 
 $script:overlays = @{}   # hwnd(문자열) -> [PSCustomObject]@{ Form }
+$script:lastClipSig = @{}   # hwnd(문자열) -> 마지막으로 기록한 클리핑 상태 (debug.log 중복 방지)
+
+Write-DebugLog "START"
+foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
+    Write-DebugLog ("  screen {0} primary={1} bounds={2}" -f $s.DeviceName, $s.Primary, $s.Bounds)
+}
 
 function New-OverlayEntry {
     $form = New-Object OverlayForm
@@ -391,6 +427,16 @@ $timer.Add_Tick({
                     }
                 }
 
+                # 어떤 창 때문에 오버레이가 잘렸는지 debug.log에 남긴다 (바뀔 때만 기록).
+                $clipSig = ($overlapping | ForEach-Object {
+                    "[{0} '{1}' L{2},T{3},R{4},B{5}]" -f [Win32]::GetClassNameOf($_.Hwnd), [Win32]::GetTitleOf($_.Hwnd), $_.Rect.Left, $_.Rect.Top, $_.Rect.Right, $_.Rect.Bottom
+                }) -join " "
+                $kakaoSig = "L{0},T{1},R{2},B{3}" -f $rect.Left, $rect.Top, $rect.Right, $rect.Bottom
+                if ($script:lastClipSig[$key] -ne "$kakaoSig|$clipSig") {
+                    $script:lastClipSig[$key] = "$kakaoSig|$clipSig"
+                    if ($overlapping.Count -gt 0) { Write-DebugLog ("kakao({0}) clipped by: {1}" -f $kakaoSig, $clipSig) }
+                }
+
                 if ($overlapping.Count -gt 0) {
                     if ($DebugClipping) {
                         Write-Host ("[DEBUG] hwnd={0} 이(가) {1}개 창과 겹쳐서 클리핑됨:" -f $h, $overlapping.Count)
@@ -428,6 +474,7 @@ $timer.Add_Tick({
         $entry = $script:overlays[$key]
         if (-not $entry.Form.IsDisposed) { $entry.Form.Close() }
         $script:overlays.Remove($key)
+        $script:lastClipSig.Remove($key)
     }
   } catch {
     Write-DebugLog ("TICK ERROR: " + $_.Exception.ToString())
